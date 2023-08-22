@@ -8,7 +8,7 @@ import (
 	"github.com/psanford/gsm/mms"
 )
 
-func TestWap(t *testing.T) {
+func TestWapUnmarshalPushNotification(t *testing.T) {
 	packet := []byte{
 		0xf1, 0x06, 0x05, 0xbe, 0x8d, 0x80, 0xaf, 0x84, 0x8c, 0x82, 0x98, 0x78,
 		0x2d, 0x78, 0x2d, 0x78, 0x78, 0x2d, 0x78, 0x2d, 0x78, 0x78, 0x78, 0x78,
@@ -30,22 +30,32 @@ func TestWap(t *testing.T) {
 
 	relative := 259200 * time.Second
 
+	header := make(map[mms.MMSField]mms.HeaderField)
+	header[mms.ContentLocation] = hs("http://mt.t-mobile.com/mm?T=x-x-xxx-x-xxxxxx-xx")
+	header[mms.Expiry] = &mms.HeaderRelativeOrAbsoluteTime{
+		Relative: &relative,
+	}
+	header[mms.From] = hs("+15551231234/TYPE=PLMN")
+	header[mms.MessageClass] = hs("personal")
+	header[mms.MMSVersion] = hs("1.2")
+	header[mms.TransactionID] = hs("x-x-xx-x-xxxxxx-xx-xxx-x")
+
+	size := mms.HeaderUint(100451)
+	header[mms.MessageSize] = &size
+
+	typ := mms.MNotificationInd
+	header[mms.MessageType] = &typ
+
 	expectPacket := mms.Message{
-		Header: mms.MessageHeader{
-			ContentLocation: "http://mt.t-mobile.com/mm?T=x-x-xxx-x-xxxxxx-xx",
-			Expiry: &mms.RelativeOrAbsoluteTime{
-				Relative: &relative,
-			},
-			From:          "+15551231234/TYPE=PLMN",
-			MessageClass:  "personal",
-			MessageType:   mms.MNotificationInd,
-			MMSVersion:    "1.2",
-			MessageSize:   100451,
-			TransactionID: "x-x-xx-x-xxxxxx-xx-xxx-x",
-		},
+		Header: header,
 	}
 
 	if !cmp.Equal(*m, expectPacket) {
 		t.Fatal(cmp.Diff(*m, expectPacket))
 	}
+}
+
+func hs(s string) *mms.HeaderString {
+	h := mms.HeaderString(s)
+	return &h
 }

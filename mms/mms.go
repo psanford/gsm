@@ -9,39 +9,11 @@ import (
 )
 
 type Message struct {
-	Header MessageHeader
+	Header map[MMSField]HeaderField
 }
 
-type MessageHeader struct {
-	BCC              string
-	CC               string
-	ContentLocation  string
-	ContentType      string
-	Date             time.Time
-	DeliveryReport   bool
-	DeliveryTime     *RelativeOrAbsoluteTime
-	Expiry           *RelativeOrAbsoluteTime
-	From             string
-	MessageClass     string
-	MessageID        string
-	MessageType      MessageType
-	MMSVersion       string
-	MessageSize      uint64
-	Priority         Priority
-	ReadReply        bool
-	ReportAllowed    bool
-	ResponseStatus   ResponseStatus
-	ResponseText     string
-	SenderVisibility SenderVisibility
-	Status           Status
-	Subject          string
-	To               string
-	TransactionID    string
-}
-
-type RelativeOrAbsoluteTime struct {
-	Relative *time.Duration
-	Absolute *time.Time
+type HeaderField interface {
+	String() string
 }
 
 func Unmarshal(packet []byte) (*Message, error) {
@@ -57,8 +29,10 @@ func Unmarshal(packet []byte) (*Message, error) {
 		return nil, err
 	}
 
+	dec.decodeBody()
+
 	msg := Message{
-		Header: *hdr,
+		Header: hdr,
 	}
 
 	return &msg, nil
@@ -70,16 +44,32 @@ type decoder struct {
 	err    error
 }
 
+type Body struct {
+}
+
+func (d *decoder) decodeBody() (*Body, error) {
+	entries, err := d.decodeVarUint()
+	if err != nil {
+		return nil, err
+	}
+
+	fmt.Printf("XXX entries: %d\n", entries)
+
+	return nil, nil
+
+}
+
 // WAP-209: section 7.1
 //
 //	Header = MMS-header | Application-header
-func (d *decoder) decodeHeader() (*MessageHeader, error) {
+func (d *decoder) decodeHeader() (map[MMSField]HeaderField, error) {
 	if d.err != nil {
 		return nil, d.err
 	}
 
-	var hdr MessageHeader
+	hdr := make(map[MMSField]HeaderField)
 
+OUTER:
 	for {
 		mmsFieldType, err := d.decodeFieldType()
 		if err == io.EOF {
@@ -89,182 +79,140 @@ func (d *decoder) decodeHeader() (*MessageHeader, error) {
 			return nil, err
 		}
 
+		if mmsFieldType == 0 {
+			break
+		}
+
 		switch mmsFieldType {
-		case Bcc:
-			bcc, err := d.decodeEncodedString()
+		case Bcc, Cc, ResponseText, Subject, To:
+			str, err := d.decodeEncodedString()
 			if err != nil {
 				d.err = err
 				return nil, err
 			}
-			hdr.BCC = bcc
-		case Cc:
-			cc, err := d.decodeEncodedString()
-			if err != nil {
-				d.err = err
-				return nil, err
-			}
-			hdr.CC = cc
-		case ResponseText:
-			txt, err := d.decodeEncodedString()
-			if err != nil {
-				d.err = err
-				return nil, err
-			}
-			hdr.ResponseText = txt
-		case Subject:
-			sub, err := d.decodeEncodedString()
-			if err != nil {
-				d.err = err
-				return nil, err
-			}
-			hdr.Subject = sub
-		case To:
-			to, err := d.decodeEncodedString()
-			if err != nil {
-				d.err = err
-				return nil, err
-			}
-			hdr.Subject = to
+			hs := HeaderString(str)
+			hdr[mmsFieldType] = &hs
 		case From:
 			from, err := d.decodeFrom()
 			if err != nil {
 				d.err = err
 				return nil, err
 			}
-			hdr.From = from
-		case DeliveryReport:
+			hs := HeaderString(from)
+			hdr[mmsFieldType] = &hs
+		case DeliveryReport, ReadReply, ReportAllowed:
 			val, err := d.decodeBoolean()
 			if err != nil {
 				d.err = err
 				return nil, err
 			}
-			hdr.DeliveryReport = val
-		case ReadReply:
-			val, err := d.decodeBoolean()
-			if err != nil {
-				d.err = err
-				return nil, err
-			}
-			hdr.ReadReply = val
-		case ReportAllowed:
-			val, err := d.decodeBoolean()
-			if err != nil {
-				d.err = err
-				return nil, err
-			}
-			hdr.ReportAllowed = val
+			hb := HeaderBool(val)
+			hdr[mmsFieldType] = &hb
 		case ContentType:
 			val, err := d.decodeContentTypeValue()
 			if err != nil {
 				d.err = err
 				return nil, err
 			}
-			hdr.ContentType = val
+			hs := HeaderString(val)
+			hdr[mmsFieldType] = &hs
+
+			// ContentType will be the last header
+			break OUTER
 		case Date:
 			date, err := d.decodeDate()
 			if err != nil {
 				d.err = err
 				return nil, err
 			}
-			hdr.Date = date
-		case DeliveryTimeField:
+			hd := HeaderTime(date)
+			hdr[mmsFieldType] = &hd
+		case DeliveryTime, Expiry:
 			dt, err := d.decodeRelativeOrAbsoluteTime()
 			if err != nil {
 				d.err = err
 				return nil, err
 			}
-			hdr.DeliveryTime = dt
-		case Expiry:
-			dt, err := d.decodeRelativeOrAbsoluteTime()
-			if err != nil {
-				d.err = err
-				return nil, err
-			}
-			hdr.Expiry = dt
+			hdr[mmsFieldType] = dt
 		case MessageSize:
 			size, err := d.decodeLongInt()
 			if err != nil {
 				d.err = err
 				return nil, err
 			}
-			hdr.MessageSize = size
+			hu := HeaderUint(size)
+			hdr[mmsFieldType] = &hu
 		case MessageClass:
 			cls, err := d.decodeMessageClass()
 			if err != nil {
 				d.err = err
 				return nil, err
 			}
-			hdr.MessageClass = cls
-		case MessageID:
-			id, err := d.decodeTextEnc()
+			hs := HeaderString(cls)
+			hdr[mmsFieldType] = &hs
+		case MessageID, ContentLocation, TransactionID:
+			txt, err := d.decodeTextEnc()
 			if err != nil {
 				d.err = err
 				return nil, err
 			}
-			hdr.MessageID = id
-		case MessageTypeField:
+			hs := HeaderString(txt)
+			hdr[mmsFieldType] = &hs
+		case MessageType:
 			typ, err := d.decodeMessageType()
 			if err != nil {
 				d.err = err
 				return nil, err
 			}
-			hdr.MessageType = typ
+			hdr[mmsFieldType] = &typ
 		case MMSVersion:
 			version, err := d.decodeVersion()
 			if err != nil {
 				d.err = err
 				return nil, err
 			}
-			hdr.MMSVersion = version
-		case PriorityField:
+			hs := HeaderString(version)
+			hdr[mmsFieldType] = &hs
+		case Priority:
 			priority, err := d.decodePriority()
 			if err != nil {
 				d.err = err
 				return nil, err
 			}
-			hdr.Priority = priority
-		case ResponseStatusField:
+			hdr[mmsFieldType] = &priority
+		case ResponseStatus:
 			status, err := d.decodeResponseStatus()
 			if err != nil {
 				d.err = err
 				return nil, err
 			}
-			hdr.ResponseStatus = status
-		case ContentLocation:
-			loc, err := d.decodeTextEnc()
-			if err != nil {
-				d.err = err
-				return nil, err
-			}
-			hdr.ContentLocation = loc
-		case SenderVisibilityField:
+			hdr[mmsFieldType] = &status
+		case SenderVisibility:
 			vis, err := d.decodeSenderVisibility()
 			if err != nil {
 				d.err = err
 				return nil, err
 			}
-			hdr.SenderVisibility = vis
+			hdr[mmsFieldType] = &vis
 		case StatusField:
 			status, err := d.decodeStatus()
 			if err != nil {
 				d.err = err
 				return nil, err
 			}
-			hdr.Status = status
-		case TransactionID:
-			txid, err := d.decodeTextEnc()
-			if err != nil {
-				d.err = err
-				return nil, err
-			}
-			hdr.TransactionID = txid
+			hdr[mmsFieldType] = &status
+
+		case RetrieveStatus:
+			// XXXX don't populate
+			d.r.ReadByte()
+
 		default:
-			d.err = fmt.Errorf("unknown mms field type 0x%x", mmsFieldType)
+			d.err = fmt.Errorf("unknown mms field type %s", mmsFieldType)
 			return nil, d.err
 		}
 	}
 
-	return &hdr, nil
+	return hdr, nil
 }
 
 func (d *decoder) decodeEncodedString() (string, error) {
@@ -344,12 +292,17 @@ func (d *decoder) offset() int64 {
 }
 
 func (d *decoder) decodeFieldType() (MMSField, error) {
-	b, err := d.decodeShortInt()
+	peekBytes, err := d.r.Peek(1)
 	if err != nil {
 		return 0, err
 	}
-
-	return MMSField(b), nil
+	b := peekBytes[0]
+	if b&0x80 != 0x80 {
+		return 0, fmt.Errorf("invalid short int at pos:%d, value: 0x%x", d.offset()-1, b)
+	}
+	f := b & 0x7f
+	d.r.ReadByte()
+	return MMSField(f), nil
 }
 
 func (d *decoder) decodeBoolean() (bool, error) {
@@ -368,7 +321,7 @@ func (d *decoder) decodeBoolean() (bool, error) {
 	return false, fmt.Errorf("Invalid boolean value at pos:%d, value: 0x%x", d.offset()-1, b)
 }
 
-func (d *decoder) decodeLongInt() (uint64, error) {
+func (d *decoder) decodeLongInt() (uint32, error) {
 	// 	Long-integer = Short-length Multi-octet-integer
 	// ; The Short-length indicates the length of the Multi-octet-integer
 	// Multi-octet-integer = 1*30 OCTET
@@ -386,14 +339,14 @@ func (d *decoder) decodeLongInt() (uint64, error) {
 		return 0, fmt.Errorf("unsupported long int at pos:%d, byte size: %d", d.offset()-1, shortLen)
 	}
 
-	var u uint64
+	var u uint32
 	for i := 0; i < int(shortLen); i++ {
 		b, err := d.r.ReadByte()
 		if err != nil {
 			return 0, err
 		}
 		u <<= 8
-		u |= uint64(b)
+		u |= uint32(b)
 	}
 
 	return u, nil
@@ -464,7 +417,7 @@ func (d *decoder) decodeDate() (time.Time, error) {
 	return t, nil
 }
 
-func (d *decoder) decodeRelativeOrAbsoluteTime() (*RelativeOrAbsoluteTime, error) {
+func (d *decoder) decodeRelativeOrAbsoluteTime() (*HeaderRelativeOrAbsoluteTime, error) {
 	// 	7.2.7. Delivery-Time field
 	// Delivery-time-value = Value-length (Absolute-token Date-value | Relative-token Delta-seconds-value)
 	// Absolute-token = <Octet 128>
@@ -486,7 +439,7 @@ func (d *decoder) decodeRelativeOrAbsoluteTime() (*RelativeOrAbsoluteTime, error
 		return nil, err
 	}
 
-	var result RelativeOrAbsoluteTime
+	var result HeaderRelativeOrAbsoluteTime
 
 	switch mode {
 	case absolute:
@@ -550,7 +503,7 @@ func (d *decoder) decodeContentTypeValue() (string, error) {
 	}
 }
 
-func (d *decoder) decodeValueLength() (uint64, error) {
+func (d *decoder) decodeValueLength() (uint32, error) {
 	// 8.4.2.2 Length
 	// The following rules are used to encode length indicators.
 	// Value-length = Short-length | (Length-quote Length)
@@ -563,7 +516,7 @@ func (d *decoder) decodeValueLength() (uint64, error) {
 		return 0, err
 	}
 	if b < 31 {
-		return uint64(b), nil
+		return uint32(b), nil
 	} else if b == 31 {
 		return d.decodeVarUint()
 	} else {
@@ -571,11 +524,11 @@ func (d *decoder) decodeValueLength() (uint64, error) {
 	}
 }
 
-func (d *decoder) decodeVarUint() (uint64, error) {
+func (d *decoder) decodeVarUint() (uint32, error) {
 	var (
-		result  uint64
+		result  uint32
 		more    = true
-		maxIter = 10
+		maxIter = 5
 	)
 	for i := 0; i < maxIter && more; i++ {
 		b, err := d.r.ReadByte()
@@ -584,7 +537,7 @@ func (d *decoder) decodeVarUint() (uint64, error) {
 		}
 
 		result <<= 7
-		result |= uint64(b & 0x7f)
+		result |= uint32(b & 0x7f)
 		more = b&0x80 == 0x80
 	}
 	if more {
@@ -687,7 +640,7 @@ func (d *decoder) decodeConstrainedMedia() (string, error) {
 	}
 }
 
-func (d *decoder) decodeMessageType() (MessageType, error) {
+func (d *decoder) decodeMessageType() (HeaderMessageType, error) {
 	// 	7.2.14. Message-Type field
 	// Message-type-value = m-send-req | m-send-conf | m-notification-ind | m-notifyresp-ind | m-retrieve-conf | macknowledge-ind | m-delivery-ind
 	// m-send-req = <Octet 128>
@@ -708,7 +661,7 @@ func (d *decoder) decodeMessageType() (MessageType, error) {
 		return UnknownMessageType, nil
 	}
 
-	return MessageType(b), nil
+	return HeaderMessageType(b), nil
 }
 
 func (d *decoder) decodeVersion() (string, error) {
@@ -730,65 +683,73 @@ func (d *decoder) decodeVersion() (string, error) {
 	return fmt.Sprintf("%d.%d", major, minor), nil
 }
 
-func (d *decoder) decodePriority() (Priority, error) {
+func (d *decoder) decodePriority() (HeaderPriority, error) {
 	b, err := d.r.ReadByte()
 	if err != nil {
 		return 0, err
 	}
-	return Priority(b), nil
+	return HeaderPriority(b), nil
 }
 
-func (d *decoder) decodeResponseStatus() (ResponseStatus, error) {
+func (d *decoder) decodeResponseStatus() (HeaderResponseStatus, error) {
 	b, err := d.r.ReadByte()
 	if err != nil {
 		return 0, err
 	}
-	return ResponseStatus(b), nil
+	return HeaderResponseStatus(b), nil
 }
 
-func (d *decoder) decodeSenderVisibility() (SenderVisibility, error) {
+func (d *decoder) decodeSenderVisibility() (HederSenderVisibility, error) {
 	b, err := d.r.ReadByte()
 	if err != nil {
 		return 0, err
 	}
-	return SenderVisibility(b), nil
+	return HederSenderVisibility(b), nil
 }
 
-func (d *decoder) decodeStatus() (Status, error) {
+func (d *decoder) decodeStatus() (HeaderStatus, error) {
 	b, err := d.r.ReadByte()
 	if err != nil {
 		return 0, err
 	}
-	return Status(b), nil
+	return HeaderStatus(b), nil
 }
 
 type MMSField int
 
 const (
-	Bcc                   MMSField = 0x01
-	Cc                    MMSField = 0x02
-	ContentLocation       MMSField = 0x03
-	ContentType           MMSField = 0x04
-	Date                  MMSField = 0x05
-	DeliveryReport        MMSField = 0x06
-	DeliveryTimeField     MMSField = 0x07
-	Expiry                MMSField = 0x08
-	From                  MMSField = 0x09
-	MessageClass          MMSField = 0x0a
-	MessageID             MMSField = 0x0b
-	MessageTypeField      MMSField = 0x0c
-	MMSVersion            MMSField = 0x0d
-	MessageSize           MMSField = 0x0e
-	PriorityField         MMSField = 0x0f
-	ReadReply             MMSField = 0x10
-	ReportAllowed         MMSField = 0x11
-	ResponseStatusField   MMSField = 0x12
-	ResponseText          MMSField = 0x13
-	SenderVisibilityField MMSField = 0x14
-	StatusField           MMSField = 0x15
-	Subject               MMSField = 0x16
-	To                    MMSField = 0x17
-	TransactionID         MMSField = 0x18
+	Bcc              MMSField = 0x01
+	Cc               MMSField = 0x02
+	ContentLocation  MMSField = 0x03
+	ContentType      MMSField = 0x04
+	Date             MMSField = 0x05
+	DeliveryReport   MMSField = 0x06
+	DeliveryTime     MMSField = 0x07
+	Expiry           MMSField = 0x08
+	From             MMSField = 0x09
+	MessageClass     MMSField = 0x0a
+	MessageID        MMSField = 0x0b
+	MessageType      MMSField = 0x0c
+	MMSVersion       MMSField = 0x0d
+	MessageSize      MMSField = 0x0e
+	Priority         MMSField = 0x0f
+	ReadReply        MMSField = 0x10
+	ReportAllowed    MMSField = 0x11
+	ResponseStatus   MMSField = 0x12
+	ResponseText     MMSField = 0x13
+	SenderVisibility MMSField = 0x14
+	StatusField      MMSField = 0x15
+	Subject          MMSField = 0x16
+	To               MMSField = 0x17
+	TransactionID    MMSField = 0x18
+
+	RetrieveStatus         MMSField = 0x19
+	RetrieveText           MMSField = 0x20
+	ReadStatus             MMSField = 0x21
+	ReplayCharging         MMSField = 0x22
+	ReplayChargingDeadline MMSField = 0x23
+	ReplayChargingID       MMSField = 0x24
+	ReplayChargingSize     MMSField = 0x25
 )
 
 func (f MMSField) String() string {
@@ -805,7 +766,7 @@ func (f MMSField) String() string {
 		return "Date"
 	case DeliveryReport:
 		return "Delivery-Report"
-	case DeliveryTimeField:
+	case DeliveryTime:
 		return "Delivery-Time"
 	case Expiry:
 		return "Expiry"
@@ -815,23 +776,23 @@ func (f MMSField) String() string {
 		return "Message-Class"
 	case MessageID:
 		return "Message-ID"
-	case MessageTypeField:
+	case MessageType:
 		return "Message-Type"
 	case MMSVersion:
 		return "MMS-Version"
 	case MessageSize:
 		return "Message-Size"
-	case PriorityField:
+	case Priority:
 		return "Priority"
 	case ReadReply:
 		return "Read-Reply"
 	case ReportAllowed:
 		return "Report-Allowed"
-	case ResponseStatusField:
+	case ResponseStatus:
 		return "Response-Status"
 	case ResponseText:
 		return "Response-Text"
-	case SenderVisibilityField:
+	case SenderVisibility:
 		return "Sender-Visibility"
 	case StatusField:
 		return "Status"
@@ -841,222 +802,22 @@ func (f MMSField) String() string {
 		return "To"
 	case TransactionID:
 		return "Transaction-ID"
+	case RetrieveStatus:
+		return "Retrieve-Status"
+	case RetrieveText:
+		return "Retrieve-Text"
+	case ReadStatus:
+		return "Read-Status"
+	case ReplayCharging:
+		return "Replay-Charging"
+	case ReplayChargingDeadline:
+		return "Replay-Charging-Deadline"
+	case ReplayChargingID:
+		return "Replay-Charging-ID"
+	case ReplayChargingSize:
+		return "Replay-Charging-Size"
+
 	default:
 		return fmt.Sprintf("UnknownMMSField<%d>", f)
 	}
-}
-
-type FieldEncoding int
-
-const (
-	UnknownEnc FieldEncoding = iota
-	BooleanEnc
-	ContentTypeEnc
-	DateEnc
-	DeliveryTimeEnc
-	EncodedStringEnc
-	ExpiryEnc
-	FromEnc
-	LongIntegerEnc
-	MessageClassEnc
-	MessageTypeEnc
-	PriorityEnc
-	ResponseStatusEnc
-	SenderVisibilityEnc
-	StatusEnc
-	TextStringEnc
-	UriEnc
-	VersionEnc
-)
-
-func (f MMSField) Encoding() FieldEncoding {
-	switch f {
-	case Bcc:
-		return EncodedStringEnc
-	case Cc:
-		return EncodedStringEnc
-	case ContentLocation:
-		return UriEnc
-	case ContentType:
-		return ContentTypeEnc
-	case Date:
-		return DateEnc
-	case DeliveryReport:
-		return BooleanEnc
-	case DeliveryTimeField:
-		return DeliveryTimeEnc
-	case Expiry:
-		return ExpiryEnc
-	case From:
-		return FromEnc
-	case MessageClass:
-		return MessageClassEnc
-	case MessageID:
-		return TextStringEnc
-	case MessageTypeField:
-		return MessageTypeEnc
-	case MMSVersion:
-		return VersionEnc
-	case MessageSize:
-		return LongIntegerEnc
-	case PriorityField:
-		return PriorityEnc
-	case ReadReply:
-		return BooleanEnc
-	case ReportAllowed:
-		return BooleanEnc
-	case ResponseStatusField:
-		return ResponseStatusEnc
-	case ResponseText:
-		return EncodedStringEnc
-	case SenderVisibilityField:
-		return SenderVisibilityEnc
-	case StatusField:
-		return StatusEnc
-	case Subject:
-		return EncodedStringEnc
-	case To:
-		return EncodedStringEnc
-	case TransactionID:
-		return TextStringEnc
-	default:
-		return UnknownEnc
-	}
-}
-
-type MessageType int
-
-const (
-	UnknownMessageType MessageType = 0
-	MSendReq           MessageType = 128
-	MSendConf          MessageType = 129
-	MNotificationInd   MessageType = 130
-	MNotifyrespInd     MessageType = 131
-	MRetrieveConf      MessageType = 132
-	MAcknowledgeInd    MessageType = 133
-	MDeliveryInd       MessageType = 134
-)
-
-func (mt MessageType) String() string {
-	switch mt {
-	case MSendReq:
-		return "m-send-req"
-	case MSendConf:
-		return "m-send-conf"
-	case MNotificationInd:
-		return "m-notification-ind"
-	case MNotifyrespInd:
-		return "m-notifyresp-ind"
-	case MRetrieveConf:
-		return "m-retrieve-conf"
-	case MAcknowledgeInd:
-		return "m-acknowledge-ind"
-	case MDeliveryInd:
-		return "m-delivery-ind"
-	default:
-		return "UnknownMessageType"
-	}
-}
-
-type Priority int
-
-const (
-	Low    Priority = 128
-	Medium Priority = 129
-	High   Priority = 130
-)
-
-func (p Priority) String() string {
-	switch p {
-	case Low:
-		return "low"
-	case Medium:
-		return "medium"
-	case High:
-		return "high"
-	default:
-		return "UnknownPriority"
-	}
-}
-
-type ResponseStatus int
-
-const (
-	StatusOk                            ResponseStatus = 128
-	StatusErrorUnspecified              ResponseStatus = 129
-	StatusErrorServiceDenied            ResponseStatus = 130
-	StatusErrorMessageFormatCorrupt     ResponseStatus = 131
-	StatusErrorSendingAddressUnresolved ResponseStatus = 132
-	StatusErrorMessageNotFound          ResponseStatus = 133
-	StatusErrorNetworkProblem           ResponseStatus = 134
-	StatusErrorContentNotAccepted       ResponseStatus = 135
-	StatusErrorUnsupportedMessage       ResponseStatus = 136
-)
-
-func (rs ResponseStatus) String() string {
-	switch rs {
-	case StatusOk:
-		return "Ok"
-	case StatusErrorUnspecified:
-		return "Error-unspecified"
-	case StatusErrorServiceDenied:
-		return "Error-service-denied"
-	case StatusErrorMessageFormatCorrupt:
-		return "Error-message-format-corrupt"
-	case StatusErrorSendingAddressUnresolved:
-		return "Error-sending-address-unresolved"
-	case StatusErrorMessageNotFound:
-		return "Error-message-not-found"
-	case StatusErrorNetworkProblem:
-		return "Error-network-problem"
-	case StatusErrorContentNotAccepted:
-		return "Error-content-not-accepted"
-	case StatusErrorUnsupportedMessage:
-		return "Error-unsupported-message"
-	}
-
-	return "Error-unspecified"
-}
-
-type SenderVisibility int
-
-const (
-	Hide SenderVisibility = 128
-	Show SenderVisibility = 129
-)
-
-func (v SenderVisibility) String() string {
-	switch v {
-	case Hide:
-		return "hide"
-	case Show:
-		return "show"
-	}
-	return fmt.Sprintf("SenderVisibilityUnknown<%d>", v)
-}
-
-type Status int
-
-const (
-	StatusExpired      Status = 128
-	StatusRetrieved    Status = 129
-	StatusRejected     Status = 130
-	StatusDeferred     Status = 131
-	StatusUnrecognised Status = 132
-)
-
-func (s Status) String() string {
-	switch s {
-	case StatusExpired:
-		return "expired"
-	case StatusRetrieved:
-		return "retrieved"
-	case StatusRejected:
-		return "rejected"
-	case StatusDeferred:
-		return "deferred"
-	case StatusUnrecognised:
-		return "unrecognised"
-	}
-	return fmt.Sprintf("StatusUnknown<%d>", s)
 }
