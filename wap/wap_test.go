@@ -30,21 +30,21 @@ func TestWapUnmarshalPushNotification(t *testing.T) {
 
 	relative := 259200 * time.Second
 
-	header := make(map[mms.MMSField]mms.HeaderField)
-	header[mms.ContentLocation] = hs("http://mt.t-mobile.com/mm?T=x-x-xxx-x-xxxxxx-xx")
-	header[mms.Expiry] = &mms.HeaderRelativeOrAbsoluteTime{
+	header := make(map[mms.MMSField][]mms.HeaderField)
+	header[mms.ContentLocation] = []mms.HeaderField{hs("http://mt.t-mobile.com/mm?T=x-x-xxx-x-xxxxxx-xx")}
+	header[mms.Expiry] = []mms.HeaderField{&mms.HeaderRelativeOrAbsoluteTime{
 		Relative: &relative,
-	}
-	header[mms.From] = hs("+15551231234/TYPE=PLMN")
-	header[mms.MessageClass] = hs("personal")
-	header[mms.MMSVersion] = hs("1.2")
-	header[mms.TransactionID] = hs("x-x-xx-x-xxxxxx-xx-xxx-x")
+	}}
+	header[mms.From] = []mms.HeaderField{hs("+15551231234/TYPE=PLMN")}
+	header[mms.MessageClass] = []mms.HeaderField{hs("personal")}
+	header[mms.MMSVersion] = []mms.HeaderField{hs("1.2")}
+	header[mms.TransactionID] = []mms.HeaderField{hs("x-x-xx-x-xxxxxx-xx-xxx-x")}
 
 	size := mms.HeaderUint(100451)
-	header[mms.MessageSize] = &size
+	header[mms.MessageSize] = []mms.HeaderField{&size}
 
 	typ := mms.MNotificationInd
-	header[mms.MessageType] = &typ
+	header[mms.MessageType] = []mms.HeaderField{&typ}
 
 	expectPacket := mms.Message{
 		Header: header,

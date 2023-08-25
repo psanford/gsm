@@ -9,7 +9,7 @@ import (
 )
 
 type Message struct {
-	Header map[MMSField]HeaderField
+	Header map[MMSField][]HeaderField
 	Parts  []PDUPart
 }
 
@@ -141,12 +141,12 @@ func (d *decoder) decodeBody() ([]PDUPart, error) {
 // WAP-209: section 7.1
 //
 //	Header = MMS-header | Application-header
-func (d *decoder) decodeHeader() (map[MMSField]HeaderField, error) {
+func (d *decoder) decodeHeader() (map[MMSField][]HeaderField, error) {
 	if d.err != nil {
 		return nil, d.err
 	}
 
-	hdr := make(map[MMSField]HeaderField)
+	hdr := make(map[MMSField][]HeaderField)
 
 OUTER:
 	for {
@@ -170,7 +170,7 @@ OUTER:
 				return nil, err
 			}
 			hs := HeaderString(str)
-			hdr[mmsFieldType] = &hs
+			hdr[mmsFieldType] = append(hdr[mmsFieldType], &hs)
 		case From:
 			from, err := d.decodeFrom()
 			if err != nil {
@@ -178,7 +178,7 @@ OUTER:
 				return nil, err
 			}
 			hs := HeaderString(from)
-			hdr[mmsFieldType] = &hs
+			hdr[mmsFieldType] = append(hdr[mmsFieldType], &hs)
 		case DeliveryReport, ReadReply, ReportAllowed:
 			val, err := d.decodeBoolean()
 			if err != nil {
@@ -186,7 +186,7 @@ OUTER:
 				return nil, err
 			}
 			hb := HeaderBool(val)
-			hdr[mmsFieldType] = &hb
+			hdr[mmsFieldType] = append(hdr[mmsFieldType], &hb)
 		case ContentType:
 			val, _, err := d.decodeContentTypeValue()
 			if err != nil {
@@ -194,7 +194,7 @@ OUTER:
 				return nil, err
 			}
 			hs := HeaderString(val)
-			hdr[mmsFieldType] = &hs
+			hdr[mmsFieldType] = append(hdr[mmsFieldType], &hs)
 
 			// ContentType will be the last header
 			break OUTER
@@ -205,14 +205,14 @@ OUTER:
 				return nil, err
 			}
 			hd := HeaderTime(date)
-			hdr[mmsFieldType] = &hd
+			hdr[mmsFieldType] = append(hdr[mmsFieldType], &hd)
 		case DeliveryTime, Expiry:
 			dt, err := d.decodeRelativeOrAbsoluteTime()
 			if err != nil {
 				d.err = err
 				return nil, err
 			}
-			hdr[mmsFieldType] = dt
+			hdr[mmsFieldType] = append(hdr[mmsFieldType], dt)
 		case MessageSize:
 			size, err := d.decodeLongInt()
 			if err != nil {
@@ -220,7 +220,7 @@ OUTER:
 				return nil, err
 			}
 			hu := HeaderUint(size)
-			hdr[mmsFieldType] = &hu
+			hdr[mmsFieldType] = append(hdr[mmsFieldType], &hu)
 		case MessageClass:
 			cls, err := d.decodeMessageClass()
 			if err != nil {
@@ -228,7 +228,7 @@ OUTER:
 				return nil, err
 			}
 			hs := HeaderString(cls)
-			hdr[mmsFieldType] = &hs
+			hdr[mmsFieldType] = append(hdr[mmsFieldType], &hs)
 		case MessageID, ContentLocation, TransactionID:
 			txt, err := d.decodeTextEnc()
 			if err != nil {
@@ -236,14 +236,14 @@ OUTER:
 				return nil, err
 			}
 			hs := HeaderString(txt)
-			hdr[mmsFieldType] = &hs
+			hdr[mmsFieldType] = append(hdr[mmsFieldType], &hs)
 		case MessageType:
 			typ, err := d.decodeMessageType()
 			if err != nil {
 				d.err = err
 				return nil, err
 			}
-			hdr[mmsFieldType] = &typ
+			hdr[mmsFieldType] = append(hdr[mmsFieldType], &typ)
 		case MMSVersion:
 			version, err := d.decodeVersion()
 			if err != nil {
@@ -251,35 +251,35 @@ OUTER:
 				return nil, err
 			}
 			hs := HeaderString(version)
-			hdr[mmsFieldType] = &hs
+			hdr[mmsFieldType] = append(hdr[mmsFieldType], &hs)
 		case Priority:
 			priority, err := d.decodePriority()
 			if err != nil {
 				d.err = err
 				return nil, err
 			}
-			hdr[mmsFieldType] = &priority
+			hdr[mmsFieldType] = append(hdr[mmsFieldType], &priority)
 		case ResponseStatus:
 			status, err := d.decodeResponseStatus()
 			if err != nil {
 				d.err = err
 				return nil, err
 			}
-			hdr[mmsFieldType] = &status
+			hdr[mmsFieldType] = append(hdr[mmsFieldType], &status)
 		case SenderVisibility:
 			vis, err := d.decodeSenderVisibility()
 			if err != nil {
 				d.err = err
 				return nil, err
 			}
-			hdr[mmsFieldType] = &vis
+			hdr[mmsFieldType] = append(hdr[mmsFieldType], &vis)
 		case StatusField:
 			status, err := d.decodeStatus()
 			if err != nil {
 				d.err = err
 				return nil, err
 			}
-			hdr[mmsFieldType] = &status
+			hdr[mmsFieldType] = append(hdr[mmsFieldType], &status)
 
 		case RetrieveStatus:
 			// XXXX don't populate
