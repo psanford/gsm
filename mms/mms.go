@@ -10,6 +10,7 @@ import (
 
 type Message struct {
 	Header map[MMSField]HeaderField
+	Parts  []PDUPart
 }
 
 type HeaderField interface {
@@ -29,10 +30,14 @@ func Unmarshal(packet []byte) (*Message, error) {
 		return nil, err
 	}
 
-	dec.decodeBody()
+	parts, err := dec.decodeBody()
+	if err != nil {
+		return nil, err
+	}
 
 	msg := Message{
 		Header: hdr,
+		Parts:  parts,
 	}
 
 	return &msg, nil
@@ -44,19 +49,93 @@ type decoder struct {
 	err    error
 }
 
-type Body struct {
+type PDUPart struct {
+	Header      map[string]string
+	FileName    string
+	ContentType string
+	Data        []byte
 }
 
-func (d *decoder) decodeBody() (*Body, error) {
+func (d *decoder) decodeBody() ([]PDUPart, error) {
 	entries, err := d.decodeVarUint()
 	if err != nil {
 		return nil, err
 	}
 
-	fmt.Printf("XXX entries: %d\n", entries)
+	var parts []PDUPart
 
-	return nil, nil
+	for i := 0; i < int(entries); i++ {
+		part := PDUPart{
+			Header: make(map[string]string),
+		}
+		headerLen, err := d.decodeVarUint()
+		if err != nil {
+			return nil, err
+		}
+		dataLen, err := d.decodeVarUint()
+		if err != nil {
+			return nil, err
+		}
 
+		headerBuf := make([]byte, headerLen)
+		n, err := io.ReadFull(d.r, headerBuf)
+		if err != nil {
+			return nil, fmt.Errorf("read mime part header err: %w, n:%d want:%d", err, n, headerLen)
+		}
+		rr := bytes.NewReader(headerBuf)
+		tmpDecoder := decoder{
+			r:      bufio.NewReader(rr),
+			seeker: rr,
+		}
+
+		s, params, err := tmpDecoder.decodeContentTypeValue()
+		if err != nil {
+			return nil, fmt.Errorf("decode content type for mime part err: %w", err)
+		}
+
+		part.ContentType = s
+		if typ, ok := params[TypeParam]; ok {
+			part.Header["Content-Type"] = typ
+		}
+		for k, v := range params {
+			switch k {
+			case TypeParam:
+				part.Header["Content-Type"] = v
+			case NameParam:
+				part.Header["Name"] = v
+			case CharsetParam:
+				part.Header["Character-Set"] = v
+			case StartParam:
+				part.Header["Start"] = v
+			}
+		}
+
+		if int(tmpDecoder.offset()) < len(headerBuf) {
+			return nil, fmt.Errorf("pending part headers")
+		}
+
+		filename, headers, err := tmpDecoder.decodePartHeaders()
+		if err != nil {
+			return nil, fmt.Errorf("parse mime part header err: %w", err)
+		}
+
+		part.FileName = filename
+		for k, v := range headers {
+			part.Header[k] = v
+		}
+
+		body := make([]byte, dataLen)
+		_, err = io.ReadFull(d.r, body)
+		if err != nil {
+			return nil, fmt.Errorf("read mime part body err %w", err)
+		}
+
+		part.Data = body
+
+		parts = append(parts, part)
+	}
+
+	return parts, nil
 }
 
 // WAP-209: section 7.1
@@ -109,7 +188,7 @@ OUTER:
 			hb := HeaderBool(val)
 			hdr[mmsFieldType] = &hb
 		case ContentType:
-			val, err := d.decodeContentTypeValue()
+			val, _, err := d.decodeContentTypeValue()
 			if err != nil {
 				d.err = err
 				return nil, err
@@ -213,6 +292,102 @@ OUTER:
 	}
 
 	return hdr, nil
+}
+
+// decode a message multipart headers
+func (d *decoder) decodePartHeaders() (string, map[string]string, error) {
+	resp := make(map[string]string)
+	var fileName string
+	for {
+
+		peekBuf, err := d.r.Peek(1)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return "", nil, err
+		}
+		b := peekBuf[0]
+
+		if b > 127 {
+			// numeric assigned header
+			header := PartHeaderField(b)
+			switch header {
+			case ContentLocationPartHeader, ContentIDPartHeader:
+				txt, err := d.decodeTextEnc()
+				if err != nil {
+					return "", nil, fmt.Errorf("parse %s header part err: %w", header, err)
+				}
+
+				resp[header.String()] = txt
+			case ContentDispositionPartHeader, DepContentDispositionPartHeader:
+				// Content-disposition-value = Value-length Disposition *(Parameter)
+				// Disposition = Form-data | Attachment | Inline | Token-text
+				// Form-data = <Octet 128>
+				// Attachment = <Octet 129>
+				// Inline = <Octet 130>
+
+				len, err := d.decodeValueLength()
+				if err != nil {
+					return "", nil, fmt.Errorf("parse %s header part err: %w", header, err)
+				}
+
+				buf := make([]byte, int(len))
+				_, err = io.ReadFull(d.r, buf)
+				if err != nil {
+					return "", nil, fmt.Errorf("parse %s header part err: %w", header, err)
+				}
+
+				rr := bytes.NewReader(buf)
+				tmpDecoder := decoder{
+					r:      bufio.NewReader(rr),
+					seeker: rr,
+				}
+
+				peekBuf, err = tmpDecoder.r.Peek(1)
+				if err != nil {
+					return "", nil, fmt.Errorf("parse %s header part err: %w", header, err)
+				}
+
+				b := peekBuf[0]
+				if b > 127 {
+					tmpDecoder.r.ReadByte()
+					resp[header.String()] = PartDispositionType(b).String()
+				} else {
+					txt, err := tmpDecoder.decodeTextEnc()
+					if err != nil {
+						return "", nil, fmt.Errorf("parse %s header part err: %w", header, err)
+					}
+
+					resp[header.String()] = txt
+				}
+
+				params, err := tmpDecoder.decodeContentTypeParams()
+				if err != nil {
+					return "", nil, fmt.Errorf("parse %s header part err: %w", header, err)
+				}
+
+				fileName = params[FilenameParam]
+
+			default:
+				return "", nil, fmt.Errorf("parse %s header part err: unknown header", header)
+			}
+		} else {
+			name, err := d.decodeTextEnc()
+			if err != nil {
+				return "", nil, err
+			}
+			val, err := d.decodeTextEnc()
+			if err != nil {
+				return "", nil, err
+			}
+
+			resp[name] = val
+		}
+
+	}
+
+	return fileName, resp, nil
 }
 
 func (d *decoder) decodeEncodedString() (string, error) {
@@ -455,7 +630,7 @@ func (d *decoder) decodeRelativeOrAbsoluteTime() (*HeaderRelativeOrAbsoluteTime,
 	return &result, nil
 }
 
-func (d *decoder) decodeContentTypeValue() (string, error) {
+func (d *decoder) decodeContentTypeValue() (string, map[WellKnownParam]string, error) {
 	// 8.4.2.7 Accept field
 	// The following rules are used to encode accept values.
 	// Accept-value = Constrained-media | Accept-general-form
@@ -474,7 +649,7 @@ func (d *decoder) decodeContentTypeValue() (string, error) {
 
 	peakbuf, err := d.r.Peek(1)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	b := peakbuf[0]
 
@@ -483,12 +658,12 @@ func (d *decoder) decodeContentTypeValue() (string, error) {
 		// Value-length first byte is b < 32
 		l, err := d.decodeValueLength()
 		if err != nil {
-			return "", err
+			return "", nil, err
 		}
 		buf := make([]byte, int(l))
 		_, err = io.ReadFull(d.r, buf)
 		if err != nil {
-			return "", err
+			return "", nil, err
 		}
 
 		rr := bytes.NewReader(buf)
@@ -496,11 +671,108 @@ func (d *decoder) decodeContentTypeValue() (string, error) {
 			r:      bufio.NewReader(rr),
 			seeker: rr,
 		}
-		return tmpDecoder.decodeConstrainedMedia()
+		contentType, err := tmpDecoder.decodeConstrainedMedia()
+		if err != nil {
+			return "", nil, err
+		}
+
+		params, err := tmpDecoder.decodeContentTypeParams()
+		if err != nil {
+			return "", nil, fmt.Errorf("decode content type params err: %w", err)
+		}
+
+		return contentType, params, nil
+
 	} else {
 		// Constrained-media = Constrained-encoding
-		return d.decodeConstrainedMedia()
+		contentType, err := d.decodeConstrainedMedia()
+		return contentType, nil, err
 	}
+}
+
+func (d *decoder) decodeContentTypeParams() (map[WellKnownParam]string, error) {
+	out := make(map[WellKnownParam]string)
+	for {
+		b, err := d.r.ReadByte()
+		if err == io.EOF {
+			break
+		} else if err != nil {
+			d.err = err
+			return nil, err
+		}
+
+		param := WellKnownParam(b)
+		switch param {
+		case TypeParam, CtMrTypeParam:
+			// type = Constrained-encoding
+			// Constrained-encoding = Extension-Media | Short-integer
+			// Extension-media = *TEXT End-of-string
+
+			peakbuf, err := d.r.Peek(1)
+			if err != nil {
+				return nil, err
+			}
+			b := peakbuf[0]
+
+			if b > 127 {
+				idx, err := d.decodeShortInt()
+				if err != nil {
+					return nil, err
+				}
+				if int(idx) < len(contentTypes) {
+					contentType := contentTypes[int(idx)]
+					out[TypeParam] = contentType
+				}
+			} else {
+				text, err := d.decodeTextEnc()
+				if err != nil {
+					return nil, err
+				}
+				out[TypeParam] = text
+			}
+		case StartParam, DepStartParam:
+			text, err := d.decodeTextEnc()
+			if err != nil {
+				return nil, err
+			}
+			out[StartParam] = text
+		case CharsetParam:
+			peakbuf, err := d.r.Peek(1)
+			if err != nil {
+				return nil, err
+			}
+			b := peakbuf[0]
+			if b < 127 {
+				// Extension-Media = *TEXT End-of-string
+				// *TEXT = byte array where each byte > 31 < 127
+				text, err := d.r.ReadBytes(0)
+				if err != nil {
+					return nil, err
+				}
+				if len(text) <= 1 {
+					continue
+				}
+				out[CharsetParam] = string(text[len(text)-1])
+			} else {
+				b, err = d.decodeShortInt()
+				if err != nil {
+					return nil, err
+				}
+				if int(b) < len(contentTypes) {
+					out[CharsetParam] = contentTypes[b]
+				}
+			}
+
+		case NameParam, DepNameParam:
+			name, err := d.decodeTextEnc()
+			if err != nil {
+				return nil, err
+			}
+			out[NameParam] = name
+		}
+	}
+
+	return out, nil
 }
 
 func (d *decoder) decodeValueLength() (uint32, error) {
