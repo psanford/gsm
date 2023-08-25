@@ -31,7 +31,7 @@ func Unmarshal(packet []byte) (*Message, error) {
 	}
 
 	parts, err := dec.decodeBody()
-	if err != nil {
+	if err != nil && err != io.EOF {
 		return nil, err
 	}
 
